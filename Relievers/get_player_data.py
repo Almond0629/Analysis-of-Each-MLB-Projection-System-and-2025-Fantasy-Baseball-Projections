@@ -1,0 +1,245 @@
+from pybaseball import *
+import pandas as pd
+import math
+from statistics import mean
+import numpy as np
+import unicodedata
+from unidecode import unidecode
+
+'''
+      batting_stats index:
+      Season, Name, Team: 1~3
+      G, AB, PA, H: 5~8, 2B: 10, HR: 12, AVG: 24, BB%: 35, K%: 36
+      OBP, SLG, OPS, ISO, BABIP: 38~42
+      LD%, GB%, FB%: 44~46
+      
+      Others:
+      a = stats[0:15] is a Pandas Dataframe
+      to_numpy() converts into a 2D Numpy array
+'''
+
+# stats = batting_stats(start_season=2023, qual=1)
+# a = stats.iloc[:, [2,6,9,10,11,12]]
+# print (a.to_string())
+# a.to_csv('aSLG/aSLG.csv')
+
+def data(num, bbe, year):
+    df = pd.read_csv(bbe)
+    new_df = pd.DataFrame()
+    names, col = [], []
+    start = 0
+    end = num
+    for i in range(0, 8):
+        start += num*i
+        end += num*i
+        for j in range(start, end):
+            if end==num:
+                names.append(df.iloc[j, 0])
+                col.append(df.iloc[j, 5])
+            else:
+                col.append(df.iloc[j, 5])
+        new_df[f'{i}'] = col
+        col = []
+        start = 0
+        end = num
+    new_df.insert(0, 'Name', names)
+    print (new_df)
+    new_df.to_csv(year)
+
+def hr_data(num, hr, year):
+    df = pd.read_csv(hr)
+    col = []
+    for i in range(0, num):
+        hr_pct = df.iloc[i, 1]/df.iloc[i, 2]
+        col.append(hr_pct)
+    bbe_df = pd.read_csv(year)
+    bbe_df['HR%'] = col
+    bbe_df.to_csv(year)
+
+def find_player(name):
+    name = name.split(' ', 1)
+    player = playerid_lookup(name[1], name[0])
+    if len(player) == 0: # check if player name is correct
+        find_player = playerid_lookup(name[1], name[0], fuzzy=True)
+        for j in range(len(find_player)):
+            if find_player.iloc[j, 7] == 2022 or find_player.iloc[j, 7] == 2023 or find_player.iloc[j, 7] == 2024:
+                return find_player.at[j, 'key_mlbam']
+    if len(player) == 1:
+        return player.at[0, 'key_mlbam']
+    
+def calculate_stats(df):
+    df['K%'] = df['SO'] / df['TBF']
+    df['BB%'] = df['BB'] / df['TBF']
+    df['K%'] = pd.to_numeric(df['K%'], errors='coerce') * 100
+    df['BB%'] = pd.to_numeric(df['BB%'], errors='coerce') * 100
+    return df
+
+def scale_stats(df):
+    columns_to_scale = df.columns.to_list()[4:22]   # ~NSB
+    df['scaling_ratio'] = df['real_PA'] / df['PA']
+    for col in columns_to_scale:
+        df[col] = df[col] * df['scaling_ratio']
+    df.drop(columns=['scaling_ratio'], inplace=True)
+    return df
+
+def format_name_to_fangraphs(name):
+    if ',' in name:
+        last, first = name.split(', ')
+        return f'{first} {last}'
+    return name
+
+def normalize_name(name):
+    return unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('utf-8')
+
+
+def spray_angle(x, y):
+    angle = math.atan((x - 130) / (213 - y))  # Using an equation I found online to calculate the spray angle
+    return math.degrees(angle)
+
+class Statcast:
+    def __init__(self, stat):
+        self.stat = stat
+
+    def optimal_pull_FB(self):
+        stat_df = self.stat[['game_date','stand','bb_type','hit_distance_sc','launch_speed','launch_angle','hc_x','hc_y']]
+        bbe = len(stat_df)
+        stat_df = stat_df[stat_df.hit_distance_sc >= 200]
+        stat_df = stat_df[stat_df.launch_angle >= 22]
+        stat_df = stat_df[stat_df.launch_angle <= 42]
+        cnt = 0
+        for i in range(len(stat_df)):
+            stand = stat_df.iat[i, 1]
+            hc_x = stat_df.iat[i, 6]
+            hc_y = stat_df.iat[i, 7]
+            spray = spray_angle(hc_x, hc_y)
+            # print (f'{stat_df.iat[i, 0]} {stat_df.iat[i, 3]} {stat_df.iat[i, 4]}')
+            if stand == 'L' and spray >= 13:
+                cnt += 1
+            elif stand == 'R' and spray <= -15:
+                cnt += 1
+        return cnt, cnt/bbe
+
+    def ninetyFivePctEV(self):
+        stat_df = self.stat[['game_date', 'stand', 'bb_type', 'launch_speed', 'launch_angle', 'hc_x', 'hc_y']]
+        EV = []
+        for i in range(len(stat_df)):
+            EV.append(stat_df.iat[i, 3])
+        num = int(round(len(EV) * 0.05 + 1, 0))
+        EV.sort(reverse=True)
+        EV = EV[:len(EV) - (len(EV) - num)]
+        NinetyFiveEV = mean(EV)
+        return round(NinetyFiveEV, 2)
+    
+def get_statcast_stats(df, year):
+    full_year_data = statcast_batter_exitvelo_barrels(year, 125)
+    full_year_data['Name'] = full_year_data['last_name, first_name'].apply(format_name_to_fangraphs)
+    full_year_data['Name'] = full_year_data['Name'].apply(normalize_name)
+
+    stats = ['avg_hit_angle','anglesweetspotpercent','ev50','fbld','ev95percent','brl_percent']
+    for stat in stats:
+        df[stat] = None
+    for i, name in enumerate(df['Name']):
+        matched = full_year_data[full_year_data['Name'] == name]
+        if not matched.empty:
+            for stat in stats:
+                df.at[i, stat] = matched.iloc[0][stat]
+        else:
+            print('No match')
+    return df
+
+def get_self_made_statcast_stats(df, year):
+    df['Optimal_Pulled_Flyball%'] = None
+    df['95%_EV'] = None
+    for i, name in enumerate(df['Name']):
+        key = find_player(name)
+        if key != None:
+            stats_df = statcast_batter(f'{year}-03-28', f'{year}-10-08', player_id=key)
+            stats_df = stats_df.dropna(subset=['bb_type','launch_speed'])
+            statcast_stats = Statcast(stats_df)
+            OPFB, OPFB_pct = statcast_stats.optimal_pull_FB()
+            df.at[i, 'Optimal_Pulled_Flyball%'] = OPFB_pct
+            NineFiveEV = statcast_stats.ninetyFivePctEV()
+            df.at[i, '95%_EV'] = NineFiveEV
+    return df
+
+def get_fangraphs_stats(df, year):
+    full_year_data = batting_stats(year, qual=125)
+
+    # O-Swing%, Z-Swing%, Swing%, O-Contact%, Z-Contact%, Contact%, Zone%, F-Strike%, SwStr%, CStr%, CSW%
+    stats = ['O-Swing%', 'Z-Swing%', 'Swing%', 'O-Contact%', 'Z-Contact%', 'Contact%', 'Zone%', 'F-Strike%', 'SwStr%', 'CStr%', 'CSW%']
+    for stat in stats:
+        df[stat] = None
+    for i, name in enumerate(df['Name']):
+        matched = full_year_data[full_year_data['Name'] == name]
+        if not matched.empty:
+            for stat in stats:
+                df.at[i, stat] = matched.iloc[0][stat]
+        else:
+            print('No match')
+    for stat in stats:
+        df[stat] = pd.to_numeric(df[stat], errors='coerce') * 100
+    return df
+
+
+
+path = './Projection_model/Pitchers/ATC/2025_ATC_Projections.csv'
+path_df = pd.read_csv(path)
+
+# Get rid of accents in names and get real life stats
+# path_df['Name'] = path_df['Name'].apply(normalize_name)
+# path_df.to_csv(path, index=False)
+
+# path_df = calculate_stats(path_df)
+# path_df.to_csv(path, index=False)
+# new_df = path_df.copy()
+# get_stats = path_df.columns.to_list()[4:]
+# get_stats = [col for col in get_stats if col != 'NSB']
+# year = 2024
+# data_df = batting_stats(year, qual=100)
+# different_names = []
+# cnt = 0
+# for stat in get_stats:
+#     stat_list = []
+#     for name in path_df['Name']:
+#         try:
+#             idx = data_df.index[data_df['Name'] == name].tolist()[0]
+#             stat_list.append(data_df.loc[idx][stat])
+#         except:
+#             if cnt < 1:
+#                 different_names.append(name)
+#             stat_list.append(999)
+#     cnt += 1
+#     df = pd.DataFrame(stat_list, columns=[f'real_{stat}'])
+#     new_df = pd.concat([new_df, df], axis=1)
+# new_df = new_df[new_df['real_PA'] >= 200]
+# new_df['real_K%'] = pd.to_numeric(new_df['real_K%'], errors='coerce') * 100
+# new_df['real_BB%'] = pd.to_numeric(new_df['real_BB%'], errors='coerce') * 100
+# new_df.to_csv(path, header=True, index=False)
+
+# Scale the stats to real_PA
+# new_df = scale_stats(path_df)
+# new_df.to_csv(path, index=False)
+
+# name = 'Will Smith'
+# key = find_player(name)
+# stats_df = statcast_batter('2022-03-28', '2022-10-08', player_id=622110)
+# stats_df = stats_df.dropna(subset=['bb_type','launch_speed'])
+# statcast_stats = Statcast(stats_df)
+# OPFB, OPFB_pct = statcast_stats.optimal_pull_FB()
+# print(OPFB, OPFB_pct)
+# nineFiveEV = statcast_stats.ninetyFivePctEV()
+# print(nineFiveEV)
+
+# path_df = get_statcast_stats(path_df, year)
+# path_df = get_self_made_statcast_stats(path_df, year)
+# path_df = get_fangraphs_stats(path_df, year)
+# print(path_df)
+# path_df.to_csv(path, index=False)
+
+
+# print (find_player_name('guerrero jr.','vladimir'))
+# á
+# é
+# í
+# ó
+# ú
